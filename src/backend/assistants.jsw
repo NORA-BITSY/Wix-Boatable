@@ -1,0 +1,187 @@
+// File: backend/assistants.jsw
+import { fetch } from 'wix-fetch';
+import { getSecret } from 'wix-secrets-backend';
+import wixData from 'wix-data';
+
+// Our collection name
+const COLLECTION_NAME = "TransportQuote";
+
+// The ID of your existing AI Assistant
+const ASSISTANT_ID = "asst_PVh4M5W9SqSQPTEcF2eEhGRt";
+
+// Assistants API base
+const API_BASE = "https://api.openai.com/v1";
+
+/** Return standard headers for Assistants API */
+async function getHeaders() {
+  const apiKey = await getSecret("OPENAI_API_KEY");
+  return {
+    "Authorization": `Bearer ${apiKey}`,
+    "OpenAI-Beta": "assistants=v2",
+    "Content-Type": "application/json"
+  };
+}
+
+/** Create a new Thread, returning thread.id */
+async function createThread() {
+  const headers = await getHeaders();
+  let resp = await fetch(`${API_BASE}/threads`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({})
+  });
+  if (!resp.ok) {
+    const txt = await resp.text();
+    throw new Error(`Error creating thread: ${txt}`);
+  }
+  const json = await resp.json();
+  return json.id;
+}
+
+/** Looks for a record in the TransportQuote collection by memberId, or insert if missing.
+ *  If there's no threadId, we create one.
+ */
+export async function getOrCreateThreadForUser(memberId, emailVal) {
+  let results = await wixData.query(COLLECTION_NAME).eq("memberId", memberId).find();
+  let item;
+  if (results.items.length > 0) {
+    item = results.items[0];
+  } else {
+    // Create a new record
+    item = {
+      memberId,
+      email: emailVal,
+      chatDateTime: new Date(),
+      attachments: [],
+      chatTranscript: ""
+    };
+    item = await wixData.insert(COLLECTION_NAME, item);
+  }
+
+  // If no threadId yet, create a new one
+  if (!item.threadId) {
+    const newId = await createThread();
+    item.threadId = newId;
+    item = await wixData.update(COLLECTION_NAME, item);
+  }
+  return item;
+}
+
+/** Upload a file (image, etc.) to the Assistants /files endpoint (purpose=assistants).
+ *  param fileName: "myPic.png"
+ *  param fileData: base64 string data
+ */
+export async function uploadFileToAssistants(fileName, fileData) {
+  const apiKey = await getSecret("OPENAI_API_KEY");
+  const boundary = "----WixFormBoundary123";
+  // We'll decode the base64 -> binary
+  const fileBinary = Buffer.from(fileData, "base64");
+
+  let partsBefore = [];
+  partsBefore.push(`--${boundary}\r\nContent-Disposition: form-data; name="purpose"\r\n\r\nassistants\r\n`);
+  partsBefore.push(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: application/octet-stream\r\n\r\n`);
+  const firstHalf = partsBefore.join("");
+  const lastHalf = `\r\n--${boundary}--\r\n`;
+
+  const fullBody = Buffer.concat([
+    Buffer.from(firstHalf, "utf8"),
+    fileBinary,
+    Buffer.from(lastHalf, "utf8")
+  ]);
+
+  let resp = await fetch(`${API_BASE}/files`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "OpenAI-Beta": "assistants=v2",
+      "Content-Type": `multipart/form-data; boundary=${boundary}`
+    },
+    body: fullBody
+  });
+  if (!resp.ok) {
+    const txt = await resp.text();
+    throw new Error(`Error uploading file: ${txt}`);
+  }
+  let json = await resp.json();
+  return json.id; // file_id
+}
+
+/** Send a user message to the thread, run the assistant, return final text reply. */
+export async function userSendMessage(threadId, userText, fileIds=[]) {
+  const headers = await getHeaders();
+
+  // 1) Add a user message
+  let attachArr = fileIds.map(fid => ({
+    file_id: fid,
+    tools: []
+  }));
+  let messageBody = {
+    role: "user",
+    content: userText,
+    attachments: attachArr
+  };
+
+  let msgResp = await fetch(`${API_BASE}/threads/${threadId}/messages`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(messageBody)
+  });
+  if (!msgResp.ok) {
+    throw new Error(`Error adding user message: ${await msgResp.text()}`);
+  }
+
+  // 2) Create a Run
+  let runPayload = {
+    assistant_id: ASSISTANT_ID
+  };
+  let runResp = await fetch(`${API_BASE}/threads/${threadId}/runs`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(runPayload)
+  });
+  if (!runResp.ok) {
+    throw new Error(`Error creating run: ${await runResp.text()}`);
+  }
+  let runJson = await runResp.json();
+  let runId = runJson.id;
+
+  // 3) Poll until run completed
+  let finalReply = await pollRunForReply(threadId, runId);
+  return finalReply;
+}
+
+/** Poll run status. Once completed, retrieve the final assistant text. */
+async function pollRunForReply(threadId, runId) {
+  const headers = await getHeaders();
+  for (let i=0; i<20; i++) {
+    await new Promise(r => setTimeout(r, 1500));
+    let check = await fetch(`${API_BASE}/threads/${threadId}/runs/${runId}`, {
+      method: "GET",
+      headers
+    });
+    if (!check.ok) {
+      throw new Error(`Error polling run: ${await check.text()}`);
+    }
+    let runData = await check.json();
+    if (["completed","failed","cancelled","incomplete"].includes(runData.status)) {
+      if (runData.status !== "completed") {
+        return `Run ended with status: ${runData.status}`;
+      }
+      // List messages for that run
+      let msgListResp = await fetch(`${API_BASE}/threads/${threadId}/messages?run_id=${runId}`, {
+        method: "GET",
+        headers
+      });
+      if (!msgListResp.ok) {
+        throw new Error(`Error listing final messages: ${await msgListResp.text()}`);
+      }
+      let msgList = await msgListResp.json();
+      // final assistant msg
+      let assistantMsg = msgList.data.reverse().find(m => m.role === "assistant");
+      if (!assistantMsg) return "[No assistant message found]";
+      let textPart = assistantMsg.content.find(c => c.type === "text");
+      return textPart ? textPart.text.value : "[No text found]";
+    }
+  }
+  return "[Run did not complete in time]";
+}

@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Boatable Copilot Assistant</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      font-family: sans-serif;
+      background-color: #fafafa;
+    }
+    #chatContainer {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+      box-sizing: border-box;
+      padding: 10px;
+
+      /* Example styling: 70% white, round corners. */
+      border-radius: 15px;
+      background-color: rgba(255,255,255,0.7);
+    }
+
+    .chatBubble {
+      max-width: 80%;
+      margin: 5px 0;
+      padding: 10px;
+      border-radius: 8px;
+      line-height: 1.4em;
+      word-wrap: break-word;
+    }
+    .userBubble {
+      background-color: #cce5ff; /* Light blue */
+      align-self: flex-end;
+    }
+    .botBubble {
+      background-color: #d4edda; /* Light green */
+      align-self: flex-start;
+    }
+
+    /* Overlay for the "..." waiting animation. Hidden by default. */
+    #fadeOverlay {
+      display: none;
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background-color: rgba(255,255,255,0.8);
+      z-index: 999;
+      justify-content: center;
+      align-items: center;
+      font-size: 24px;
+      color: #666;
+    }
+    #ellipsisAnimation {
+      font-size: 24px;
+      color: #666;
+    }
+  </style>
+</head>
+<body>
+  <div id="chatContainer"></div>
+
+  <div id="fadeOverlay">
+    <div id="ellipsisAnimation"></div>
+  </div>
+
+  <script>
+    const chatContainer = document.getElementById('chatContainer');
+    const fadeOverlay = document.getElementById('fadeOverlay');
+    const ellipsisDiv = document.getElementById('ellipsisAnimation');
+    let dotsInterval;
+
+    /**
+     * Show a user message bubble (aligned right, in light blue).
+     */
+    function showUserMessage(msg) {
+      const bubble = document.createElement('div');
+      bubble.classList.add('chatBubble', 'userBubble');
+      bubble.textContent = msg;
+      chatContainer.appendChild(bubble);
+      chatContainer.scrollTop = chatContainer.scrollHeight;
+    }
+
+    /**
+     * Show a bot (assistant) message bubble (aligned left, in light green).
+     */
+    function showBotMessage(msg) {
+      const bubble = document.createElement('div');
+      bubble.classList.add('chatBubble', 'botBubble');
+      bubble.textContent = msg;
+      chatContainer.appendChild(bubble);
+      chatContainer.scrollTop = chatContainer.scrollHeight;
+    }
+
+    /**
+     * Display the waiting overlay with "..." animation.
+     */
+    function showWaiting() {
+      fadeOverlay.style.display = 'flex';
+      let dots = '';
+      dotsInterval = setInterval(() => {
+        if (dots.length < 3) dots += '.';
+        else dots = '';
+        ellipsisDiv.textContent = dots;
+      }, 750);
+    }
+
+    /**
+     * Hide the waiting overlay.
+     */
+    function hideWaiting() {
+      fadeOverlay.style.display = 'none';
+      clearInterval(dotsInterval);
+      ellipsisDiv.textContent = '';
+    }
+
+    /**
+     * Listen for messages from the Wix page code: event.data => { type, message }.
+     */
+    window.addEventListener('message', (event) => {
+      const data = event.data;
+      if (!data || !data.type) return;
+      switch (data.type) {
+        case 'USER_MESSAGE':
+          showUserMessage(data.message);
+          break;
+        case 'BOT_MESSAGE':
+          showBotMessage(data.message);
+          break;
+        case 'SHOW_WAITING':
+          showWaiting();
+          break;
+        case 'HIDE_WAITING':
+          hideWaiting();
+          break;
+        default:
+          // ignore
+          break;
+      }
+    });
+  </script>
+</body>
+</html>
